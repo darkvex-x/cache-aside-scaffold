@@ -1,29 +1,31 @@
 import { redis } from "../redis.js";
 
 /**
- * invalidation rules — ONE source of truth. YOUR JOB.
+ * Invalidation rules — single source of truth.
  *
- * Every write that changes a cached read must DEL the key(s) it affects.
- * Keeping all the rules here (not scattered across controllers) is what
- * stops invalidation from drifting as the app grows.
+ * Feed invalidation uses a version counter:
+ * Key format: `posts:feed:v{v}:page={page}:sort={sort}`
+ * When a new post is created:
+ * `invalidate.onNewPost()` calls `INCR posts:feed:version`.
+ * This instantly invalidates ALL paginated/sorted feed views atomically in O(1)
+ * without scanning or calling KEYS (which blocks single-threaded Redis).
  *
- * Wire these up so that:
- *   - creating a post  clears the cached feed
- *   - editing a user   clears THAT user's cached profile (only that one)
- *
- * NOTE on the feed: if your feed key includes params (page, sort), a single
- * `redis.del("posts:feed")` won't cover every page. Decide how to handle it
- * and write your reasoning in the README. DO NOT use `redis.keys("posts:feed:*")`
- * in production — KEYS blocks single-threaded Redis. Use one of:
- *   - a fixed, un-paginated feed key (simplest for this scaffold), or
- *   - a version counter in the key (INCR on write), or
- *   - an explicit dependency list of live feed keys.
+ * User profile invalidation:
+ * `invalidate.onProfileEdit(id)` deletes `user:{id}`, with strict per-user precision.
  */
+
+export async function getFeedVersion() {
+  const v = await redis.get("posts:feed:version");
+  return v ? Number(v) : 1;
+}
+
 export const invalidate = {
   onNewPost: async () => {
-    // TODO: DEL the cached feed key(s).
+    // Atomically bump feed version so all previous feed keys miss naturally
+    await redis.incr("posts:feed:version");
   },
   onProfileEdit: async (userId) => {
-    // TODO: DEL only this user's cached profile key.
+    // Invalidate ONLY this user's profile
+    await redis.del(`user:${userId}`);
   },
 };

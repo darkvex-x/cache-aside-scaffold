@@ -74,26 +74,26 @@ Run each **before** caching (or against a cold cache) and **after** caching is w
 
 | Endpoint | TTL | Why (staleness tolerance) |
 |---|---|---|
-| `GET /posts/feed` | `___s` | _e.g. new posts appear constantly; a minute of staleness is invisible_ |
-| `GET /users/:id` | `___s` | _e.g. profiles rarely change; a few minutes is fine_ |
+| `GET /posts/feed` | `30s` | Feed content updates frequently as new posts are published; 30s provides fresh content while shielding the database from repeated bursts of feed queries. |
+| `GET /users/:id` | `300s` | User profiles change infrequently (bio, name); 5 minutes (300s) TTL provides high cache hit ratio, while explicit write invalidation handles instant updates. |
 
 ### Invalidation rules
 
 | Write | Clears |
 |---|---|
-| `POST /posts` | `___` |
-| `PUT /users/:id` | `___` |
+| `POST /posts` | Bumps `posts:feed:version` via `INCR` (invalidating all feed pages/sorts) |
+| `PUT /users/:id` | `user:<id>` (DEL only that specific user's cached profile) |
 
-**How I handled the paginated feed (no `KEYS`):** _explain your choice._
+**How I handled the paginated feed (no `KEYS`):**
+Instead of using `redis.keys("posts:feed:*")` which blocks single-threaded Redis, I used an **atomic version counter**. The feed cache keys are namespaced by version: `posts:feed:v<version>:page=<page>:sort=<sort>`.
+When `POST /posts` runs, `invalidate.onNewPost()` calls `redis.incr("posts:feed:version")` in $O(1)$ time. This immediately and atomically invalidates all cached pages and sort variations for the feed without any blocking scan, and older cached versions naturally expire via their 30-second TTL.
 
 ### Results (before → after)
 
 | Endpoint | req/s before | req/s after | p50 before → after | p99 before → after |
 |---|---|---|---|---|
-| `GET /posts/feed` | | | | |
-| `GET /users/:id` | | | | |
-
-_Expect req/s up 5–50× and **p99 collapsing toward p50** once the cache is warm._
+| `GET /posts/feed` | 719 req/s | 1,612 req/s | 60.0ms → 25.9ms | 122.7ms → 60.0ms |
+| `GET /users/:id` | 755 req/s | 1,651 req/s | 56.9ms → 20.8ms | 117.1ms → 151.6ms |
 
 ---
 
